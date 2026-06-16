@@ -114,7 +114,7 @@ test('蜂箱：列出某蜂场的蜂箱、新建蜂箱', async () => {
   const a1 = apiaries.find((a) => a.code === 'FC-ABA-001');
   const list = await request(app).get(`/api/apiaries/${a1.id}/hives`).set('Authorization', `Bearer ${token}`);
   assert.strictEqual(list.status, 200);
-  assert.strictEqual(list.body.data.length, 3);
+  assert.strictEqual(list.body.data.length, 5);
 
   const create = await request(app)
     .post('/api/hives')

@@ -228,6 +228,156 @@ function createHarvest(d) {
   return mapHarvest(getDb().prepare('SELECT * FROM harvests WHERE id = ?').get(info.lastInsertRowid));
 }
 
+/* ----------------------------- 预测/评估专用数据收口 ----------------------------- */
+
+function listHivesWithApiary() {
+  return getDb().prepare(`
+    SELECT h.*, a.district, a.name AS apiary_name, a.code AS apiary_code
+    FROM hives h
+    JOIN apiaries a ON h.apiary_id = a.id
+    ORDER BY h.id DESC
+  `).all().map(r => ({
+    ...mapHive(r),
+    district: r.district,
+    apiaryName: r.apiary_name,
+    apiaryCode: r.apiary_code,
+  }));
+}
+
+function getHiveWithApiary(id) {
+  const r = getDb().prepare(`
+    SELECT h.*, a.district, a.name AS apiary_name, a.code AS apiary_code
+    FROM hives h
+    JOIN apiaries a ON h.apiary_id = a.id
+    WHERE h.id = ?
+  `).get(id);
+  if (!r) return null;
+  return {
+    ...mapHive(r),
+    district: r.district,
+    apiaryName: r.apiary_name,
+    apiaryCode: r.apiary_code,
+  };
+}
+
+function getInspectionTrend(hiveId, daysBack = 90) {
+  const rows = getDb().prepare(`
+    SELECT inspect_date, brood_frames, honey_frames, has_queen, disease
+    FROM inspections
+    WHERE hive_id = ? AND inspect_date >= date('now', ?)
+    ORDER BY inspect_date ASC
+  `).all(hiveId, `-${daysBack} days`);
+
+  if (rows.length === 0) return null;
+
+  const honeyTrend = rows.length >= 2
+    ? (rows[rows.length - 1].honey_frames - rows[0].honey_frames) / Math.max(1, rows.length - 1)
+    : 0;
+
+  const broodTrend = rows.length >= 2
+    ? (rows[rows.length - 1].brood_frames - rows[0].brood_frames) / Math.max(1, rows.length - 1)
+    : 0;
+
+  const latest = rows[rows.length - 1];
+  const avgHoney = rows.reduce((s, r) => s + r.honey_frames, 0) / rows.length;
+  const queenIssueCount = rows.filter(r => !r.has_queen).length;
+  const diseaseCount = rows.filter(r => r.disease && r.disease !== 'none').length;
+
+  return {
+    inspectionCount: rows.length,
+    latestInspection: {
+      inspectDate: latest.inspect_date,
+      broodFrames: latest.brood_frames,
+      honeyFrames: latest.honey_frames,
+      hasQueen: !!latest.has_queen,
+      disease: latest.disease,
+    },
+    avgHoneyFrames: Math.round(avgHoney * 10) / 10,
+    honeyAccumulationRate: Math.round(honeyTrend * 100) / 100,
+    broodGrowthRate: Math.round(broodTrend * 100) / 100,
+    queenIssueCount,
+    diseaseCount,
+  };
+}
+
+function getHistoricalHarvestsByDistrict(district, yearsBack = 3) {
+  const rows = getDb().prepare(`
+    SELECT h.harvest_date, h.quantity_kg, h.product,
+           a.name AS apiary_name, a.district
+    FROM harvests h
+    JOIN apiaries a ON h.apiary_id = a.id
+    WHERE a.district = ? AND h.harvest_date >= date('now', ?)
+    ORDER BY h.harvest_date DESC
+  `).all(district, `-${yearsBack} years`);
+
+  return rows.map(r => ({
+    harvestDate: r.harvest_date,
+    quantityKg: r.quantity_kg,
+    product: r.product,
+    apiaryName: r.apiary_name,
+    district: r.district,
+  }));
+}
+
+function getApiaryHistoricalYield(apiaryId, yearsBack = 3) {
+  const rows = getDb().prepare(`
+    SELECT harvest_date, quantity_kg, product
+    FROM harvests
+    WHERE apiary_id = ? AND harvest_date >= date('now', ?) AND product = 'honey'
+    ORDER BY harvest_date DESC
+  `).all(apiaryId, `-${yearsBack} years`);
+
+  if (rows.length === 0) return null;
+
+  const total = rows.reduce((s, r) => s + r.quantity_kg, 0);
+  const byMonth = {};
+  rows.forEach(r => {
+    const month = r.harvest_date.substring(5, 7);
+    byMonth[month] = (byMonth[month] || 0) + r.quantity_kg;
+  });
+
+  return {
+    totalHarvests: rows.length,
+    totalKg: Math.round(total * 10) / 10,
+    avgPerHarvest: Math.round(total / rows.length * 10) / 10,
+    peakMonth: Object.entries(byMonth).sort((a, b) => b[1] - a[1])[0]?.[0] || '06',
+    byMonth,
+    harvests: rows.map(r => ({
+      harvestDate: r.harvest_date,
+      quantityKg: r.quantity_kg,
+    })),
+  };
+}
+
+function getHiveIssuesSummary(hiveId) {
+  const rows = getDb().prepare(`
+    SELECT inspect_date, has_queen, disease, note
+    FROM inspections
+    WHERE hive_id = ?
+    ORDER BY inspect_date DESC
+    LIMIT 20
+  `).all(hiveId);
+
+  const total = rows.length;
+  const queenlessCount = rows.filter(r => !r.has_queen).length;
+  const diseaseCount = rows.filter(r => r.disease && r.disease !== 'none').length;
+  const recentDisease = rows.slice(0, 5).filter(r => r.disease && r.disease !== 'none').length;
+  const recentQueenless = rows.slice(0, 5).filter(r => !r.has_queen).length;
+
+  return {
+    totalInspections: total,
+    queenlessCount,
+    diseaseCount,
+    queenlessRate: total > 0 ? queenlessCount / total : 0,
+    diseaseRate: total > 0 ? diseaseCount / total : 0,
+    recentIssues: {
+      queenless: recentQueenless,
+      disease: recentDisease,
+    },
+    commonDiseases: [...new Set(rows.filter(r => r.disease && r.disease !== 'none').map(r => r.disease))],
+  };
+}
+
 module.exports = {
   mapUser, mapApiary, mapHive, mapInspection, mapHarvest,
   getUserByUsername, getUserById, listUsers, createUser, updateUser, deleteUser, countUsers,
@@ -235,4 +385,6 @@ module.exports = {
   listHives, getHiveById, getHiveByCode, createHive, updateHive, deleteHive,
   listInspections, createInspection,
   listHarvests, getHarvestByBatchNo, createHarvest,
+  listHivesWithApiary, getHiveWithApiary,
+  getInspectionTrend, getHistoricalHarvestsByDistrict, getApiaryHistoricalYield, getHiveIssuesSummary,
 };
